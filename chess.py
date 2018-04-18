@@ -3,6 +3,7 @@ import math
 import string
 import colorama
 import sys
+import copy
 
 colorama.init()
 
@@ -18,9 +19,10 @@ colorama.init()
 #DONE: decoding
 #DONE: create castling move class
 #DONE: create e.p. move class
-#todo: support Pawn promotion (pawn move followed by =<piece type>)
+#DONE: support Pawn promotion (pawn move followed by =<piece type>)
+#DONE: handle ambiguous moves: if more piece can do the move, the one NOT letting the king in a checked position can move
 #todo: make table a class
-#todo: en passant
+#DONE: en passant
 #todo: batch files: more binaries in bin, more tables in in one log file
 
 ############################# Chess Table Representation #############################
@@ -39,7 +41,13 @@ class Piece (object):
 
 		if Moved not in [True,False]:
 			raise Exception("Bad Moved",Moved)
+			
+	def __eq__(self, other):
+		return type(other)==Piece and self.Color == other.Color and self.Type == other.Type and self.Moved == other.Moved
 						
+	def __ne__(self, other):
+		return not self.__eq__(other)
+
 	def isWhite(self):return self.Color=="w";
 	def isBlack(self):return self.Color=="b";
 
@@ -58,17 +66,22 @@ class Piece (object):
 
 ############################# define move #############################
 class Move (object):
-	def __init__(self, piece, to_x,to_y,capture=False):
+	def __init__(self, piece, to_x,to_y,capture=False,kingcapture=False):
 		self.piece = piece
 		self.to_x = to_x
 		self.to_y = to_y
 		self.capture = capture
 		self.from_x=None
 		self.from_y=None
+		self.promotion=None #piece promoted to
+		self.Kingcapture=kingcapture
 				
 		if self.to_x not in range(0,8):raise Exception("Bad move to",self.to_x,self.to_y,capture)
 		if self.to_y not in range(0,8):raise Exception("Bad move to",self.to_x,self.to_y,capture)
 		if self.capture not in [True,False] :raise Exception("Bad move to",to_x,to_y,capture)
+		
+	def isKingCapture(self):
+		return self.Kingcapture
 		
 	def toString(self):
 		string = self.piece.toString()
@@ -77,7 +90,12 @@ class Move (object):
 		string += 'abcdefgh'[self.to_x] 
 		string += str(self.to_y+1)
 		if self.capture:
-			string += "X"
+			if self.Kingcapture:
+				string += "+"
+			else:
+				string += "X"
+		if self.promotion!=None:
+			string += "=" + self.promotion.toString()
 
 		return string
 		
@@ -86,6 +104,7 @@ class Move (object):
 		if type(other) is EnPassant:
 			return self.piece.isPawn() and other.piece.isPawn() and self.to_x == other.to_x and self.to_y == other.to_y
 		if self.to_x != other.to_x or self.to_y != other.to_y : return False
+		if self.promotion != other.promotion : return False
 		return self.piece.Type == other.piece.Type
 
 
@@ -96,6 +115,9 @@ class Castling (object):
 		self.to_y = to_y
 		self.from_x=None
 		self.from_y=None
+		
+	def isKingCapture(self):
+		return False
 
 	def toString(self):
 		string = self.piece.toString()
@@ -114,6 +136,9 @@ class EnPassant (Move):
 		self.ep_x=capture_x
 		self.ep_y=capture_y
 
+	def isKingCapture(self):
+		return False
+
 	def toString(self):
 		return super(EnPassant,self).toString()+"e.p."
 		
@@ -126,23 +151,24 @@ direction=[[-1,-1],[-1, 0],[-1, 1],[ 0, 1],[ 1, 1],[ 1, 0],[ 1,-1],[ 0,-1]]
 # return: [] if not valid, [to_x,to_y] if valid, [to_x,to_y,"!<captured_piece>"] if opposite players piece is captured
 def ValidMove(to_x,to_y,piece):
 	#print "piece",piece.toString()," move to ",to_x,to_y,
-#	print LastMove
-#	if LastMove!=None and LastMove.piece.isPawn() and piece.isPawn():
-#		print LastMove.from_x,LastMove.from_y,LastMove.to_x, LastMove.to_y ,to_x, to_y
+	#print "" if LastMove==None else LastMove.toString()
+	#if LastMove!=None and LastMove.piece.isPawn() and piece.isPawn():
+		#print LastMove.from_x,LastMove.from_y,LastMove.to_x, LastMove.to_y ,to_x, to_y
 
 	if not to_x in range(0,8) or not to_y in range(0,8):
 		#print "out"
 		return None
 	if table[to_x][to_y]==None:
-		#print "valid, free"
+		#print "valid, free",
 		#check en passant
 		if LastMove!=None and LastMove.piece.isPawn() and piece.isPawn():
-			if LastMove.from_y-LastMove.to_y in [-2,2] and LastMove.from_x == LastMove.to_x and (LastMove.from_y+LastMove.to_y)/2 == to_y:
+			if LastMove.from_y-LastMove.to_y in [-2,2] and LastMove.from_x == to_x and LastMove.from_x == LastMove.to_x and (LastMove.from_y+LastMove.to_y)/2 == to_y:
+				#print "e.p."
 				return EnPassant(piece,to_x,to_y,LastMove.to_x,LastMove.to_y)
 		return Move(piece,to_x,to_y)
 	elif table[to_x][to_y].Color!=piece.Color:
 		#print "valid, capture"
-		return Move(piece,to_x,to_y,True)
+		return Move(piece,to_x,to_y,True,table[to_x][to_y].isKing())
 
 	#print "occupied"
 	return None
@@ -234,7 +260,22 @@ def PawnMoves(x,y,piece):
 
 	if False:
 		for move in steps:print move.toString(),
-	return steps
+		
+	#create possible promotions
+	new_steps = []
+	for step in steps:
+		if piece.Color=="w" and step.to_y==7 or piece.Color=="b" and step.to_y==0:
+#			print "PROMOTIONS"
+			promotion_types="QNBR"
+			for type in promotion_types:
+				new_step=copy.copy(step)
+				new_step.promotion=Piece(piece.Color,type)
+				new_steps.append(new_step)
+#				print new_step.toString(),new_step.promotion==Piece(piece.Color,type)
+		else:
+			new_steps.append(step)
+			
+	return new_steps
 
 def GeneralMove(x,y):
 	steps=[]
@@ -252,64 +293,62 @@ def GeneralMove(x,y):
 	return []
 	
 #do a move
-def DoMove(x_from,y_from,input_move):
+def DoMove(x_from,y_from,move):
 
 	# last move - used for e.p.
 	global LastMove
 	
-	#print "Make Move:",move.toString()
-	x_to=input_move.to_x
-	y_to=input_move.to_y
+#	print "Make Move:",move.toString()
+	x_to=move.to_x
+	y_to=move.to_y
 	#check
 	piece=table[x_from][y_from]
 	if piece==None:
 		raise Exception('Move from empty field',x_from,y_from)
 	
-	moves=GeneralMove(x_from,y_from)
- #	print len(moves),"moves"
-	for move in moves:
-		#print move.toString()
-		if move.to_x==x_to and move.to_y==y_to:
-			#castling
-			if type(move) is Castling:
-				if y_to not in [0,7]:raise Exception("Castling move error - bad rank")
-				if x_to not in [2,6]:raise Exception("Castling move error - bad file")
-				if table[x_to][y_to]!=None:raise Exception("Castling move error - occupied")
-				if x_to==2:
-					if table[0][y_to]==None or not table[0][y_to].isRook():raise Exception("Castling rook missing")
-					table[3][y_to],table[0][y_to]=table[0][y_to],table[3][y_to] # move rook
-					table[4][y_to],table[2][y_to]=table[2][y_to],table[4][y_to] # move king
-					table[2][y_to].Moved=table[3][y_to].Moved=True
-				elif x_to==6:
-					if table[7][y_to]==None or not table[7][y_to].isRook():raise Exception("Castling rook missing")
-					table[7][y_to],table[5][y_to]=table[5][y_to],table[7][y_to] # move rook
-					table[6][y_to],table[4][y_to]=table[4][y_to],table[6][y_to] # move king
-					table[5][y_to].Moved=table[6][y_to].Moved=True
-				else:
-					raise Exception('Not a valid castling move.')
-			elif type(move) is EnPassant:
-				assert(table[x_to][y_to]==None)
-				table[x_to][y_to],table[x_from][y_from]=table[x_from][y_from],table[x_to][y_to]
-				table[x_to][y_to].Moved=True
-				#capture en passant pawn
-				assert LastMove.piece.isPawn()
-				table[LastMove.to_x][LastMove.to_y]=None
-			else:
-				#print x_to,y_to,table[x_to][y_to]
-				#normal move
-				#empty field?
-				if table[x_to][y_to]==None:
-					table[x_to][y_to],table[x_from][y_from]=table[x_from][y_from],table[x_to][y_to]
-					table[x_to][y_to].Moved=True
-				#capture other players piece?
-				elif table[x_to][y_to].Color!=table[x_from][y_from].Color:
-					table[x_to][y_to]=table[x_from][y_from]
-					table[x_from][y_from]=None
-					table[x_to][y_to].Moved=True
-				else:
-					raise Exception('Field occupied by friendly piece',table[x_to][y_to])
+	#castling
+	if type(move) is Castling:
+		if y_to not in [0,7]:raise Exception("Castling move error - bad rank")
+		if x_to not in [2,6]:raise Exception("Castling move error - bad file")
+		if table[x_to][y_to]!=None:raise Exception("Castling move error - occupied")
+		if x_to==2:
+			if table[0][y_to]==None or not table[0][y_to].isRook():raise Exception("Castling rook missing")
+			table[3][y_to],table[0][y_to]=table[0][y_to],table[3][y_to] # move rook
+			table[4][y_to],table[2][y_to]=table[2][y_to],table[4][y_to] # move king
+			table[2][y_to].Moved=table[3][y_to].Moved=True
+		elif x_to==6:
+			if table[7][y_to]==None or not table[7][y_to].isRook():raise Exception("Castling rook missing")
+			table[7][y_to],table[5][y_to]=table[5][y_to],table[7][y_to] # move rook
+			table[6][y_to],table[4][y_to]=table[4][y_to],table[6][y_to] # move king
+			table[5][y_to].Moved=table[6][y_to].Moved=True
+		else:
+			raise Exception('Not a valid castling move.')
+	elif type(move) is EnPassant:
+		assert(table[x_to][y_to]==None)
+		table[x_to][y_to],table[x_from][y_from]=table[x_from][y_from],table[x_to][y_to]
+		table[x_to][y_to].Moved=True
+		#capture en passant pawn
+		assert LastMove.piece.isPawn()
+		table[LastMove.to_x][LastMove.to_y]=None
+	else:
+		#print x_to,y_to,table[x_to][y_to]
+		#normal move
+		#empty field?
+		if table[x_to][y_to]==None:
+			table[x_to][y_to],table[x_from][y_from]=table[x_from][y_from],table[x_to][y_to]
+		#capture other players piece?
+		elif table[x_to][y_to].Color!=table[x_from][y_from].Color:
+			table[x_to][y_to]=table[x_from][y_from]
+			table[x_from][y_from]=None
+		else:
+			raise Exception('Field occupied by friendly piece',table[x_to][y_to])
+		
+		if type(move.promotion)==Piece:
+#			print "Promotion done"
+			table[x_to][y_to].Type = move.promotion.Type
+		table[x_to][y_to].Moved=True
 				
-	LastMove = input_move; LastMove.from_x=x_from; LastMove.from_y=y_from
+	LastMove = move; LastMove.from_x=x_from; LastMove.from_y=y_from
 #	print "New Last Move=",LastMove.toString()
 
 #	except Exception as inst:
@@ -472,6 +511,7 @@ def readStep(input_file,color):
 	dis_rank=None
 	trg_file=None
 	trg_rank=None
+	promotion_type=None
 	king_castling=False;
 	queen_castling=False;
 	token = input_file.readToken()
@@ -484,6 +524,11 @@ def readStep(input_file,color):
 	if '+' in token or "#" in token:
 		token=token.replace("+","")
 		token=token.replace("#","")
+	if '=' in token :
+		print token[-2:-1],token[-1:]
+		assert token[-2:-1]=="="
+		promotion_type = token[-1:]
+		token=token[:-2]
 	if token == "O-O":
 		king_castling=True;
 		type='K'
@@ -543,6 +588,10 @@ def readStep(input_file,color):
 		move = Move(Piece(color,type), trg_file, trg_rank, capture)
 	move.from_x = dis_file
 	move.from_y = dis_rank
+	
+	if promotion_type!=None:
+		assert promotion_type in "QNBR"
+		move.promotion=Piece(color,promotion_type)
 	
 	return move
 	
@@ -635,6 +684,40 @@ def MakeCode(game_steps):
 
 	return bits
 
+def CheckKingCaptureMovesAfterMove(x_from,y_from,move,color):
+	global table,LastMove
+	#print move.toString()
+	has_checking = False
+	saved_table=copy.deepcopy(table)
+	saved_LastMove=copy.deepcopy(LastMove)
+	DoMove(x_from,y_from,move)
+	#find pieces on table
+	for y in range(0,8):
+		for x in range(0,8):
+			if table[x][y]!=None and table[x][y].Color == color:
+				for pmove in GeneralMove(x,y):
+					#print "  ",pmove.toString()
+					has_checking |= pmove.isKingCapture()
+	
+	table=saved_table
+	LastMove=saved_LastMove
+	return has_checking
+	
+def LogError(game,file_name,log_string,step,possible_moves,matching_moves,player_move):
+	PrintTable()
+	print "Possible moves:",len(possible_moves)
+	for [x,y,pmove] in possible_moves:print pmove.toString(),
+	print
+	print "Matching nonchecking moves:"
+	for [x,y,pmove] in matching_moves:print pmove.toString(),
+	print
+	
+	logfile=open(file_name+"."+str(game)+".tbl","w")
+	logfile.write(log_string)
+	logfile.close()
+
+	raise Exception("Bad move in step",step/2,player_move.toString())
+	
 def ProcessPGN(file_name):
 	pgn_file = PGNFile(file_name)
 	game = 1
@@ -658,6 +741,8 @@ def ProcessPGN(file_name):
 		verbose = False
 		step=0
 		for move in moves:
+			log_string+=move.toString()
+			log_string+="\n"
 			step = step + 1
 			color = "w" if side else "b"
 			piece = move.piece
@@ -673,35 +758,40 @@ def ProcessPGN(file_name):
 			if verbose:print "step",step,"players move: ",move.toString(),"possible moves",len(possible_moves)
 
 			matching_moves=[]
-			move_index=matching_move_index=0
 			for [x,y,pmove] in possible_moves:
 				if move.Match(pmove) and (move.from_x==None or move.from_x==x) and (move.from_y==None or move.from_y==y):
 					if verbose:print "found move",pmove.piece.toString()+'abcdefgh'[x]+str(y+1),pmove.toString()
 					matching_moves.append([x,y,pmove])
-					matching_move_index = move_index
-				move_index = move_index + 1
+			
+			matching_move = None
+			
+#			print "Number of matching moves:",len(matching_moves)
+			if len(matching_moves) > 1:
+				#see if some moves will put the King in a checking position. Find the one that wont
+				nochecking_moves=[]
+				for [x,y,pmove] in matching_moves:
+					kingcapture = CheckKingCaptureMovesAfterMove(x,y,pmove,"b" if side else "w")
+					#print kingcapture
+					if not kingcapture:
+						nochecking_moves.append([x,y,pmove])
 					
-			if len(matching_moves) != 1:
-				PrintTable()
-				print "Possible moves:"
-				for [x,y,pmove] in possible_moves:print pmove.toString(),
-				print
-				print "Matching moves:"
-				for [x,y,pmove] in matching_moves:print pmove.toString(),
-				print
-				
-				logfile=open(file_name+"."+str(game)+".tbl","w")
-				logfile.write(log_string)
-				logfile.close()
-
-				raise Exception("Bad move in step",step/2,move.toString())
+				#print "No-checking moves:",len(nochecking_moves)
+				if len(nochecking_moves) != 1:
+					LogError(game,file_name,log_string,step,possible_moves,nochecking_moves,move)
+				else:
+					matching_move=nochecking_moves[0]
+					
+			elif len(matching_moves) == 1:
+				matching_move=matching_moves[0]
 			else:
-				DoMove(matching_moves[0][0],matching_moves[0][1],matching_moves[0][2])
+				LogError(game,file_name,log_string,step,possible_moves,matching_moves,move)
+			
+			DoMove(matching_move[0],matching_move[1],matching_move[2])
 				
 			if False and verbose:
 				PrintTable()
 				
-			game_desc.append((len(possible_moves),matching_move_index))
+			game_desc.append((len(possible_moves),possible_moves.index(matching_move)))
 					
 			log_string+=LogTable(step)
 			
